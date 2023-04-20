@@ -1,9 +1,16 @@
 """Conversions to and from bytes representation of values in TDMS files"""
 
+import datetime
 import numpy as np
+import numpy.typing as npt
 import struct
+from typing import Optional, Any, Self, Union, TYPE_CHECKING
 from nptdms.timestamp import TdmsTimestamp, TimestampArray
 from nptdms.log import log_manager
+
+if TYPE_CHECKING:
+    from nptdms import TdmsFile
+
 
 
 log = log_manager.get_logger(__name__)
@@ -46,7 +53,7 @@ tds_data_types = {}
 numpy_data_types = {}
 
 
-def tds_data_type(enum_value, np_type, set_np_type=True):
+def tds_data_type(enum_value: int, np_type: Optional[npt.DTypeLike], set_np_type: bool = True):
     def decorator(cls):
         cls.enum_value = enum_value
         cls.nptype = None if np_type is None else np.dtype(np_type)
@@ -59,50 +66,52 @@ def tds_data_type(enum_value, np_type, set_np_type=True):
 
 
 class TdmsType(object):
-    size = None
+    size: Optional[int] = None
 
-    def __init__(self):
-        self.value = None
-        self.bytes = None
+    def __init__(self) -> None:
+        self.value: Any = None
+        self.bytes: Optional[bytes] = None
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, TdmsType):
+            return NotImplemented
         return self.bytes == other.bytes and self.value == other.value
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         if self.value is None:
             return "%s" % self.__class__.__name__
         return "%s(%r)" % (self.__class__.__name__, self.value)
 
     @classmethod
-    def read(cls, file, endianness="<"):
+    def read(cls, file: 'TdmsFile', endianness: str = "<") -> Any:
         raise NotImplementedError("Unsupported data type to read: %r" % cls)
 
     @classmethod
-    def read_values(cls, file, number_values, endianness="<"):
+    def read_values(cls, file: 'TdmsFile', number_values: int, endianness: str = "<") -> Any:
         raise NotImplementedError("Unsupported data type to read: %r" % cls)
 
 
 class Bytes(TdmsType):
-    def __init__(self, value):
+    def __init__(self, value: bytes) -> None:
         self.value = value
         self.bytes = value
 
 
 class StructType(TdmsType):
-    struct_declaration = None
+    struct_declaration: Optional[str] = None
     nptype = None
 
-    def __init__(self, value):
+    def __init__(self, value: bytes) -> None:
         self.value = value
         self.bytes = _struct_pack('<' + self.struct_declaration, value)
 
     @classmethod
-    def read(cls, file, endianness="<"):
+    def read(cls, file: 'TdmsFile', endianness: str = "<") -> Any:
         read_bytes = file.read(cls.size)
         return _struct_unpack(endianness + cls.struct_declaration, read_bytes)[0]
 
     @classmethod
-    def from_bytes(cls, byte_array, endianness="<"):
+    def from_bytes(cls, byte_array: npt.NDArray[np.byte], endianness: str = "<") -> npt.NDArray[np.byte]:
         """ Convert an array of bytes into a numpy array of data
         """
         array = byte_array.view()
@@ -199,20 +208,20 @@ class ExtendedFloatWithUnit(TdmsType):
 
 @tds_data_type(0x20, None)
 class String(TdmsType):
-    def __init__(self, value):
+    def __init__(self, value: str) -> None:
         self.value = value
         content = value.encode('utf-8')
         length = _struct_pack('<L', len(content))
         self.bytes = length + content
 
     @staticmethod
-    def read(file, endianness="<"):
+    def read(file: 'TdmsFile', endianness: str = "<") -> str:
         size_bytes = file.read(4)
         size = _struct_unpack(endianness + 'L', size_bytes)[0]
         return String._decode(file.read(size))
 
     @classmethod
-    def read_values(cls, file, number_values, endianness="<"):
+    def read_values(cls, file: 'TdmsFile', number_values: int, endianness: str = "<") -> list[str]:
         """ Read string raw data
 
             This is stored as an array of offsets
@@ -228,7 +237,7 @@ class String(TdmsType):
         return strings
 
     @staticmethod
-    def _decode(string_bytes):
+    def _decode(string_bytes: bytes) -> str:
         try:
             return string_bytes.decode('utf-8')
         except UnicodeDecodeError as exc:
@@ -243,12 +252,12 @@ class Boolean(StructType):
     size = 1
     struct_declaration = "b"
 
-    def __init__(self, value):
-        self.value = bool(value)
+    def __init__(self, value: str) -> None:
+        self.value: bool = bool(value)
         self.bytes = _struct_pack('<' + self.struct_declaration, self.value)
 
     @classmethod
-    def read(cls, file, endianness="<"):
+    def read(cls, file: 'TdmsFile', endianness: str = "<") -> bool:
         return bool(super(Boolean, cls).read(file, endianness))
 
 
@@ -263,11 +272,15 @@ class TimeStamp(TdmsType):
 
     size = 16
 
-    def __init__(self, value):
+    def __init__(self, value: Union[np.dtype[np.datetime64], datetime.datetime]) -> None:
+
         if not isinstance(value, np.datetime64):
-            value = np.datetime64(value, 'us')
-        self.value = value
-        epoch_delta = value - self._tdms_epoch
+            value_clean = np.datetime64(value, 'us')
+        else:
+            value_clean = value
+
+        self.value = value_clean
+        epoch_delta = value_clean - self._tdms_epoch
 
         seconds = int(epoch_delta / np.timedelta64(1, 's'))
         remainder = epoch_delta - np.timedelta64(seconds, 's')
@@ -280,7 +293,7 @@ class TimeStamp(TdmsType):
         self.bytes = _struct_pack('<Qq', second_fractions, seconds)
 
     @classmethod
-    def read(cls, file, endianness="<"):
+    def read(cls, file: 'TdmsFile', endianness: str = "<") -> TdmsTimestamp:
         data = file.read(16)
         if endianness == "<":
             (second_fractions, seconds) = _struct_unpack(
@@ -291,7 +304,7 @@ class TimeStamp(TdmsType):
         return TdmsTimestamp(seconds, second_fractions)
 
     @classmethod
-    def from_bytes(cls, byte_array, endianness="<"):
+    def from_bytes(cls, byte_array:  npt.NDArray[np.byte], endianness: str = "<") -> TimestampArray:
         """ Convert an array of bytes to an array of timestamps
         """
         byte_array = byte_array.reshape((-1, 16))
